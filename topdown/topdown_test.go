@@ -1749,6 +1749,8 @@ func TestTopDownJWTVerifyHS256(t *testing.T) {
 }
 
 func TestTopDownJWTDecodeVerify(t *testing.T) {
+	jwksOne := `{"keys":[{"kid": "e256", "crv":"P-256","d":"tT-DJZkjOAhEaLnUdc0BOvwnmFxFGyYz0PRkdOV_r80","kty":"EC","x":"z8J91ghFy5o6f2xZ4g8LsLH7u2wEpT2ntj8loahnlsE","y":"7bdeXLH61KrGWRdh7ilnbcGQACxykaPKfmBccTHIOUo"}]}`
+	jwksTwo := `{"keys":[{"kid": "e384", "crv":"P-384","d":"-9FVvStQY_zV0ymDi2hum-CSzhcAO3Jhc5x0qfpktQaZ2Za1-hxb4B3cCCiWAL_s","kty":"EC","x":"jxnQDQpVDX3hvqbBuufbczOkkPjqLZn4rg6QdosCS0jV-Pq76pb5tpc-820iz5VZ","y":"RQpYkbh1K4dj4Ddr1DAqG_uF5YQZWPQSvxJfNC2Qav-FnCS577Pv-wZKn74y16OY"}]}`
 	params := []struct {
 		note        string // test name
 		token       string // JWT
@@ -1756,7 +1758,7 @@ func TestTopDownJWTDecodeVerify(t *testing.T) {
 		valid       bool   // expected validity value
 		header      string // expected header
 		payload     string // expected claims
-		err         string // expected error or "" for succes
+		err         string // expected error or "" for success
 	}{
 		{
 			"ps256-unconstrained", // no constraints at all (apart from supplying a key)
@@ -1996,6 +1998,42 @@ func TestTopDownJWTDecodeVerify(t *testing.T) {
 			"rs256-wrong-aud-list", // constraint requires an audience, found list of wrong ones in JWT
 			"eyJhbGciOiAiUlMyNTYiLCAidHlwIjogIkpXVCJ9.eyJpc3MiOiAieHh4IiwgImF1ZCI6IFsiZnJlZCIsICJib2IiXX0.k8jW7PUiMkQCKCjnSFBFFKPDO0RXwZgVkLUwUfi8sMdrrcKi12LC8wd5fLBn0YraFtMXWKdMweKf9ZC-K33h5TK7kkTVKOXctF50mleMlUn0Up_XjtdP1v-2WOfivUXcexN1o-hu0kH7sSQnielXIjC2EAleG6A54YUOZFBdzvd1PKHlsxA7x2iiL73uGeFlyxoaMki8E5tx7FY6JGF1RdhWCoIV5A5J8QnwI5EetduJQ505U65Pk7UApWYWu4l2DT7KCCJa5dJaBvCBemVxWaBhCQWtJKU2ZgOEkpiK7b_HsdeRBmpG9Oi1o5mt5ybC09VxSD-lEda_iJO_7i042A",
 			fmt.Sprintf(`{"cert": "%s", "aud": "cath"}`, certPemPs),
+			false,
+			`{}`,
+			`{}`,
+			"",
+		},
+		{
+			"es256-jwks", // jwt which identifies an EC key by name, present in jwks
+			"eyJ0eXAiOiAiSldUIiwgImFsZyI6ICJFUzI1NiIsICJraWQiOiAiZTI1NiJ9.eyJpc3MiOiAieHh4In0.4EKvPoQICPUf6YAHFzRHNEYssQAYKK36uegOxL_4Tw26AbdB9lz5Xb7gVj92WHmveeW9oHiZxqeORQokKhm_xQ",
+			fmt.Sprintf(`{"jwks": %#v}`, jwksOne),
+			true,
+			`{"alg": "ES256", "typ": "JWT", "kid": "e256"}`,
+			`{"iss": "xxx"}`,
+			"",
+		},
+		{
+			"es256-jwks-missing", // jwt which identifies an EC key by name, present in jwks
+			"eyJ0eXAiOiAiSldUIiwgImFsZyI6ICJFUzI1NiIsICJraWQiOiAiZTI1NiJ9.eyJpc3MiOiAieHh4In0.4EKvPoQICPUf6YAHFzRHNEYssQAYKK36uegOxL_4Tw26AbdB9lz5Xb7gVj92WHmveeW9oHiZxqeORQokKhm_xQ",
+			fmt.Sprintf(`{"jwks": %#v}`, jwksTwo),
+			false,
+			`{}`,
+			`{}`,
+			"",
+		},
+		{
+			"es256-jwks-anon", // exhaustive search in the jwks for the key id
+			"eyJ0eXAiOiAiSldUIiwgImFsZyI6ICJFUzI1NiJ9.eyJpc3MiOiAieHh4In0.AFDHKhGzhjvPo_YChhO6yvWHmSRWchos82iDh4-A-6SbsPnhTroxFUr_9d01LRViqUKzKKQrFglKfEo1vqo7AA",
+			fmt.Sprintf(`{"jwks": %#v}`, jwksOne),
+			true,
+			`{"alg": "ES256", "typ": "JWT"}`,
+			`{"iss": "xxx"}`,
+			"",
+		},
+		{
+			"es256-jwks-anon-missing", // exhaustive search in the jwks for the key id, which is absent
+			"eyJ0eXAiOiAiSldUIiwgImFsZyI6ICJFUzI1NiJ9.eyJpc3MiOiAieHh4In0.AFDHKhGzhjvPo_YChhO6yvWHmSRWchos82iDh4-A-6SbsPnhTroxFUr_9d01LRViqUKzKKQrFglKfEo1vqo7AA",
+			fmt.Sprintf(`{"jwks": %#v}`, jwksTwo),
 			false,
 			`{}`,
 			`{}`,

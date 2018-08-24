@@ -7,10 +7,12 @@ package topdown
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -26,13 +28,22 @@ import (
 )
 
 var (
-	jwtEncKey = ast.StringTerm("enc")
-	jwtCtyKey = ast.StringTerm("cty")
-	jwtAlgKey = ast.StringTerm("alg")
-	jwtIssKey = ast.StringTerm("iss")
-	jwtExpKey = ast.StringTerm("exp")
-	jwtNbfKey = ast.StringTerm("nbf")
-	jwtAudKey = ast.StringTerm("aud")
+	jwtEncKey   = ast.StringTerm("enc")
+	jwtCtyKey   = ast.StringTerm("cty")
+	jwtAlgKey   = ast.StringTerm("alg")
+	jwtIssKey   = ast.StringTerm("iss")
+	jwtExpKey   = ast.StringTerm("exp")
+	jwtNbfKey   = ast.StringTerm("nbf")
+	jwtAudKey   = ast.StringTerm("aud")
+	jwtKeysTerm = ast.StringTerm("keys")
+	jwtKtyTerm  = ast.StringTerm("kty")
+	jwtKidTerm  = ast.StringTerm("kid")
+	jwtNTerm    = ast.StringTerm("n")
+	jwtETerm    = ast.StringTerm("e")
+	jwtCrvTerm  = ast.StringTerm("crv")
+	jwtXTerm    = ast.StringTerm("x")
+	jwtYTerm    = ast.StringTerm("y")
+	jwtOctTerm  = ast.StringTerm("oct")
 )
 
 // JSONWebToken represent the 3 parts (header, payload & signature) of
@@ -256,6 +267,9 @@ type tokenConstraints struct {
 	// The single symmetric key we will verify with.
 	secret string
 
+	// The JWK set we will use to verify with.
+	jwks map[string]interface{}
+
 	// The algorithm that must be used to verify.
 	// If "", any algorithm is acceptable.
 	alg string
@@ -282,6 +296,7 @@ var tokenConstraintTypes = map[string]tokenConstraintHandler{
 	"secret": func(value ast.Value, constraints *tokenConstraints) (err error) {
 		return tokenConstraintString("secret", value, &constraints.secret)
 	},
+	"jwks": tokenConstraintJWKS,
 	"alg": func(value ast.Value, constraints *tokenConstraints) (err error) {
 		return tokenConstraintString("alg", value, &constraints.alg)
 	},
@@ -326,6 +341,145 @@ func tokenConstraintTime(value ast.Value, constraints *tokenConstraints) (err er
 		return
 	}
 	constraints.time = int64(timeFloat)
+	return
+}
+
+// tokenConstraintJWKS handles the `jwks` constraint.
+func tokenConstraintJWKS(value ast.Value, constraints *tokenConstraints) (err error) {
+	var ok bool
+	// We will accept both strings (which we decode as JSON) or objects,
+	// in order to smoothly support different usage models.
+	if _, ok = value.(ast.String); ok {
+		if value, err = builtinJSONUnmarshal(value); err != nil {
+			return
+		}
+	}
+	var jwks ast.Object
+	if jwks, ok = value.(ast.Object); !ok {
+		err = fmt.Errorf("token jwks constraint: must be an object or string")
+		return
+	}
+	// MUST have a "keys" member...
+	var keysterm *ast.Term
+	if keysterm = jwks.Get(jwtKeysTerm); keysterm == nil {
+		err = fmt.Errorf("token jwks constraint: missing 'keys' member")
+		return
+	}
+	// ...which is a list.
+	var keys ast.Array
+	if keys, ok = keysterm.Value.(ast.Array); !ok {
+		err = fmt.Errorf("token jwks constraint: 'keys' must be a list")
+		return
+	}
+	constraints.jwks = map[string]interface{}{}
+	for _, keyterm := range keys {
+		var jwk ast.Object
+		if jwk, ok = keyterm.Value.(ast.Object); !ok {
+			err = fmt.Errorf("token jwks constraint: key must be an object")
+			return
+		}
+		var kty, kid string
+		if kty, err = jwksGetString(jwk, jwtKtyTerm); err != nil {
+			return
+		}
+		if kid, err = jwksGetString(jwk, jwtKidTerm); err != nil {
+			return
+		}
+		var k interface{}
+		switch kty {
+		case "RSA":
+			krsa := &rsa.PublicKey{}
+			if krsa.N, err = jwksGetInteger(jwk, jwtNTerm); err != nil {
+				return
+			}
+			var E *big.Int
+			if E, err = jwksGetInteger(jwk, jwtETerm); err != nil {
+				return
+			}
+			if !E.IsInt64() {
+				err = fmt.Errorf("token jwks constraint: %s: public exponent is too large", kid)
+				return
+			}
+			e := E.Int64()
+			if e > 2147483648 || e <= 1 {
+				err = fmt.Errorf("token jwks constraint: %s: public exponent is out of range", kid)
+				return
+			}
+			krsa.E = int(e)
+			k = krsa
+		case "EC":
+			kec := &ecdsa.PublicKey{}
+			var crv string
+			if crv, err = jwksGetString(jwk, jwtCrvTerm); err != nil {
+				return
+			}
+			switch crv {
+			case "P-256":
+				kec.Curve = elliptic.P256()
+			case "P-384":
+				kec.Curve = elliptic.P384()
+			case "P-521":
+				kec.Curve = elliptic.P521()
+			default:
+				continue // ignore unrecognized key types
+			}
+			if kec.X, err = jwksGetInteger(jwk, jwtXTerm); err != nil {
+				return
+			}
+			if kec.Y, err = jwksGetInteger(jwk, jwtYTerm); err != nil {
+				return
+			}
+			k = kec
+		case "oct":
+			var koct []byte
+			if koct, err = jwksGetBytes(jwk, jwtOctTerm); err != nil {
+				return
+			}
+			k = koct
+		default:
+			continue // ignore unrecognized key types
+		}
+		constraints.jwks[kid] = k
+	}
+	return
+}
+
+// jwksGetString gets a string field from a JWK
+func jwksGetString(jwk ast.Object, field *ast.Term) (value string, err error) {
+	var t *ast.Term
+	if t = jwk.Get(field); t == nil {
+		err = fmt.Errorf("token jwks constraint: missing %s", field.Value.(ast.String))
+		return
+	}
+	var ok bool
+	var s ast.String
+	if s, ok = t.Value.(ast.String); !ok {
+		err = fmt.Errorf("token jwks constraint: not a string: %s", field.Value.(ast.String))
+		return
+	}
+	value = string(s)
+	return
+}
+
+// jwksGetString gets a bytes field from a JWK
+func jwksGetBytes(jwk ast.Object, field *ast.Term) (value []byte, err error) {
+	var v string
+	if v, err = jwksGetString(jwk, field); err != nil {
+		return
+	}
+	if value, err = base64.RawURLEncoding.DecodeString(v); err != nil {
+		return
+	}
+	return
+}
+
+// jwksGetString gets an integer field from a JWK
+func jwksGetInteger(jwk ast.Object, field *ast.Term) (value *big.Int, err error) {
+	var v []byte
+	if v, err = jwksGetBytes(jwk, field); err != nil {
+		return
+	}
+	value = big.NewInt(0).SetBytes(v)
 	return
 }
 
@@ -379,6 +533,9 @@ func (constraints *tokenConstraints) validate() (err error) {
 	if constraints.secret != "" {
 		keys++
 	}
+	if constraints.jwks != nil {
+		keys++
+	}
 	if keys > 1 {
 		err = fmt.Errorf("duplicate key constraints")
 		return
@@ -410,6 +567,26 @@ func (constraints *tokenConstraints) verify(kid, alg, header, payload, signature
 	}
 	if constraints.secret != "" {
 		return a.verify([]byte(constraints.secret), a.hash, plaintext, []byte(signature))
+	}
+	// If we have a JWK set then use that.
+	if constraints.jwks != nil {
+		var key interface{}
+		// If the token contains a key ID, use that to look up the key
+		if kid != "" {
+			if key, ok = constraints.jwks[kid]; ok {
+				return a.verify(key, a.hash, plaintext, []byte(signature))
+			}
+			err = errSignatureNotVerified // token signed with untrusted key
+			return
+		}
+		// Otherwise try all the keys until we find a match
+		for _, key := range constraints.jwks {
+			if err = a.verify(key, a.hash, plaintext, []byte(signature)); err == nil {
+				return
+			}
+		}
+		err = errSignatureNotVerified // no trusted key signed token
+		return
 	}
 	// (*tokenConstraints)validate() should prevent this happening
 	err = errors.New("unexpectedly found no keys to trust")

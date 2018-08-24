@@ -142,12 +142,13 @@ For ``io.jwt.decode_verify``, ``constraints`` is an object with the following me
 | ---- | ------- | -------- |
 | ``cert`` | A PEM encoded certificate containing an RSA or ECDSA public key. | See below |
 | ``secret`` | The secret key for HS256, HS384 and HS512 verification. | See below |
+| ``jwks`` | A JWK Set containing RSA, ECDSA or octet-string keys. If the token contains a ``kid`` parameter then that is used to identify the verification key; otherwise the keys in the set are exhaustively searched until one that verifies the token is found. Unrecognized key types are ignored. | See below |
 | ``alg`` | The JWA algorithm name to use. If it is absent then any algorithm that is compatible with the key is accepted. | Optional |
 | ``iss`` | The issuer string. If it is present the only tokens with this issuer are accepted. If it is absent then any issuer is accepted. | Optional |
 |``time`` | The time in nanoseconds to verify the token at. If this is present then the ``exp`` and ``nbf`` claims are compared against this value. If it is absent then they are compared against the current time. | Optional |
 |``aud`` | The audience that the verifier identifies with.  If this is present then the ``aud`` claim is checked against it. If it is absent then the ``aud`` claim must be absent too. | Optional |
 
-Exactly one of ``cert`` and ``secret`` must be present.
+Exactly one of ``cert``, ``secret`` and ``jwks`` must be present.
 If there are any unrecognized constraints then the token is considered invalid.
 
 ### Time
